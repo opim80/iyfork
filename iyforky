@@ -76,39 +76,44 @@ local setclipboard = setclipboard or toclipboard or set_clipboard or (Clipboard 
     return ErrorPrompt("Attempted to set clipboard: "..(...),true)
 end
 
--- [MODIFIED] Stealth hookmetamethod to bypass basic Namecall checks
+-- [FIXED] Stealth hookmetamethod with recursion guard to prevent freezing
+local hook_locked = false
 local hookmetamethod = function(obj, metamethod, func)
     local mt = getrawmetatable(obj)
     local original = mt[metamethod]
 
-    -- If hooking namecall or index, ensure game scripts pass through silently
-    local stealthFunc = func
-    if (metamethod == "__namecall" or metamethod == "__index") and checkcaller then
-        stealthFunc = function(...)
-            if not checkcaller() then
-                return original(...)
-            end
-            return func(...)
+    local stealthFunc = function(...)
+        -- Prevent recursion freeze and ignore non-executor calls
+        if hook_locked or (checkcaller and not checkcaller()) then
+            return original(...)
         end
+        
+        hook_locked = true
+        -- Wrap the spy logic to ensure the lock is always released even on error
+        local success, result = pcall(func, ...)
+        hook_locked = false
+        
+        if not success then
+            -- Fallback to original if the spy logic fails
+            return original(...)
+        end
+        return result
     end
 
-    -- Wrap in C-closure to hide Lua origins from basic checks
     if newcclosure then
         stealthFunc = newcclosure(stealthFunc)
     end
 
-    -- Attempt safe function replacement
     if hookfunction then
-        return hookfunction(original, stealthFunc)
+        -- Return the result of the hook to avoid identity mismatches
+        local success, old = pcall(hookfunction, original, stealthFunc)
+        return success and old or original
     else
-        -- Fallback: Metatable V-Table swap (quieter fallback)
         local unlock = setreadonly or makewriteable or function() end
         local lock = setreadonly and function(t) setreadonly(t, true) end or makereadonly or function() end
-        
         unlock(mt, false)
         mt[metamethod] = stealthFunc
         lock(mt)
-        
         return original
     end
 end
